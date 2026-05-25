@@ -1,0 +1,98 @@
+name: CI Quality Gate 112062261
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality-gate:
+    name: Typecheck / Format / Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npm run typecheck
+
+      - name: Prettier format check
+        run: npm run format:check
+
+      - name: Run tests and export JSON report
+        run: |
+          mkdir -p reports
+          npm test -- --reporter=default --reporter=json --outputFile.json=reports/vitest-results.json
+
+      - name: Publish test results to GitHub Actions Summary
+        if: always()
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+
+          const summaryPath = process.env.GITHUB_STEP_SUMMARY;
+          const reportPath = 'reports/vitest-results.json';
+
+          function write(markdown) {
+            if (summaryPath) {
+              fs.appendFileSync(summaryPath, markdown);
+            } else {
+              console.log(markdown);
+            }
+          }
+
+          write('## Vitest Result Summary\n\n');
+
+          if (!fs.existsSync(reportPath)) {
+            write('Test result file was not generated. This usually means the pipeline stopped before the test step, for example during typecheck or Prettier check.\n');
+            process.exit(0);
+          }
+
+          const result = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+          const total = result.numTotalTests ?? 0;
+          const passed = result.numPassedTests ?? 0;
+          const failed = result.numFailedTests ?? 0;
+          const skipped = result.numPendingTests ?? result.numTodoTests ?? 0;
+          const status = failed === 0 ? 'Passed' : 'Failed';
+
+          write('| Item | Value |\n');
+          write('| --- | ---: |\n');
+          write(`| Status | ${status} |\n`);
+          write(`| Total tests | ${total} |\n`);
+          write(`| Passed | ${passed} |\n`);
+          write(`| Failed | ${failed} |\n`);
+          write(`| Skipped / Todo | ${skipped} |\n\n`);
+
+          const failedTests = [];
+          for (const suite of result.testResults ?? []) {
+            for (const test of suite.assertionResults ?? []) {
+              if (test.status === 'failed') {
+                failedTests.push(`- ${test.fullName ?? test.title ?? 'Unnamed test'}`);
+              }
+            }
+          }
+
+          if (failedTests.length > 0) {
+            write('### Failed tests\n\n');
+            write(failedTests.join('\n') + '\n');
+          }
+          NODE
